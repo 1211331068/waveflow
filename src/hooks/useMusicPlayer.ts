@@ -3,11 +3,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getAudioPlayer } from "@/lib/audio-player";
 import {
-  getHotPlaylist,
+  getPlaylistSongs,
   getSongUrl,
-  getFallbackTracks,
+  searchSongs,
   hotKeywords,
-  qualityLabels,
   type SongInfo,
   type QualityPreset,
 } from "@/lib/music-api";
@@ -23,22 +22,17 @@ interface PlayerState {
   playlist: SongInfo[];
   loading: boolean;
   error: string | null;
-  usingFallback: boolean;
+  searchResults: SongInfo[];
+  searching: boolean;
+  searchError: string | null;
 }
-
-const FALLBACK_TRACKS: SongInfo[] = getFallbackTracks().map((t) => ({
-  id: t.id,
-  name: t.name,
-  artists: t.artists,
-  album: t.album,
-  albumPic: "",
-  duration: t.duration,
-}));
 
 export function useMusicPlayer() {
   const player = useRef(getAudioPlayer()).current;
   const playIndexRef = useRef(0);
   const mountedRef = useRef(true);
+  const skipCountRef = useRef(0);
+  const MAX_SKIP = 10; // 最多连续跳过 10 首
 
   const [state, setState] = useState<PlayerState>({
     isPlaying: false,
@@ -51,10 +45,12 @@ export function useMusicPlayer() {
     playlist: [],
     loading: true,
     error: null,
-    usingFallback: false,
+    searchResults: [],
+    searching: false,
+    searchError: null,
   });
 
-  // Load playlist on mount
+  // 加载歌单
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
@@ -62,8 +58,7 @@ export function useMusicPlayer() {
     async function loadSongs() {
       setState((s) => ({ ...s, loading: true }));
       try {
-        // Try loading real songs from Netease
-        const songs = await getHotPlaylist();
+        const songs = await getPlaylistSongs();
         if (!cancelled && songs.length > 0) {
           setState((s) => ({
             ...s,
@@ -75,15 +70,13 @@ export function useMusicPlayer() {
           }));
           return;
         }
-      } catch {
-        // API error, fall through to random search
-      }
+      } catch {}
 
-      // Try searching for popular songs
+      // 备用：随机搜索热门关键词
       if (!cancelled) {
         try {
           const keyword = hotKeywords[Math.floor(Math.random() * hotKeywords.length)];
-          const songs = await import("@/lib/music-api").then((m) => m.searchSongs(keyword, 20));
+          const songs = await searchSongs(keyword, 20);
           if (songs.length > 0) {
             setState((s) => ({
               ...s,
@@ -98,39 +91,32 @@ export function useMusicPlayer() {
         } catch {}
       }
 
-      // Ultimate fallback: synthesized tracks
       if (!cancelled) {
-        setState((s) => ({
-          ...s,
-          playlist: FALLBACK_TRACKS,
-          loading: false,
-          isReady: true,
-          currentTrack: FALLBACK_TRACKS[0],
-          duration: FALLBACK_TRACKS[0].duration,
-          usingFallback: true,
-        }));
+        setState((s) => ({ ...s, loading: false, error: "暂无可用歌曲，请稍后重试" }));
       }
     }
 
     player.init().then(() => {
-      loadSongs();
+      if (mountedRef.current) loadSongs();
     });
 
     player.onTimeUpdate((t) => {
-      if (mountedRef.current) {
-        setState((s) => ({ ...s, currentTime: t }));
-      }
+      if (mountedRef.current) setState((s) => ({ ...s, currentTime: t }));
     });
 
     player.onEnded(() => {
-      if (mountedRef.current) {
-        playNextInternal();
-      }
+      if (mountedRef.current) playNextInternal();
     });
 
-    player.onError((msg) => {
+    player.onError(() => {
       if (mountedRef.current) {
-        setState((s) => ({ ...s, error: msg }));
+        skipCountRef.current++;
+        if (skipCountRef.current < MAX_SKIP) {
+          playNextInternal();
+        } else {
+          setState((s) => ({ ...s, error: "连续多首歌曲无法播放，请尝试搜索其他歌曲" }));
+          skipCountRef.current = 0;
+        }
       }
     });
 
@@ -141,7 +127,76 @@ export function useMusicPlayer() {
     };
   }, []);
 
-  // Play a specific track
+  // 🔍 搜索功能
+  const doSearch = useCallback(async (keyword: string) => {
+    if (!keyword.trim()) {
+      setState((s) => ({ ...s, searchResults: [], searching: false }));
+      return;
+    }
+    setState((s) => ({ ...s, searching: true, searchError: null }));
+    try {
+      const songs = await searchSongs(keyword, 30);
+      if (mountedRef.current) {
+        setState((s) => ({ ...s, searchResults: songs, searching: false }));
+      }
+    } catch {
+      if (mountedRef.current) {
+        setState((s) => ({ ...s, searching: false, searchError: "搜索失败，请重试" }));
+      }
+    }
+  }, []);
+
+  // 🎵 搜索并替换播放列表
+  const searchAndPlay = useCallback(async (keyword: string) => {
+    setState((s) => ({ ...s, loading: true }));
+    try {
+      const songs = await searchSongs(keyword, 30);
+      if (mountedRef.current && songs.length > 0) {
+        skipCountRef.current = 0;
+        setState((s) => ({
+          ...s,
+          playlist: songs,
+          currentTrack: songs[0],
+          currentTrackIndex: 0,
+          duration: songs[0].duration,
+          loading: false,
+          isReady: true,
+          error: null,
+        }));
+        return;
+      }
+    } catch {}
+    if (mountedRef.current) {
+      setState((s) => ({ ...s, loading: false, error: "搜索无结果" }));
+    }
+  }, []);
+
+  // 加载歌单并替换
+  const loadPlaylist = useCallback(async (playlistId: number) => {
+    setState((s) => ({ ...s, loading: true }));
+    try {
+      const songs = await getPlaylistSongs(playlistId);
+      if (mountedRef.current && songs.length > 0) {
+        skipCountRef.current = 0;
+        setState((s) => ({
+          ...s,
+          playlist: songs,
+          currentTrack: songs[0],
+          currentTrackIndex: 0,
+          duration: songs[0].duration,
+          loading: false,
+          isReady: true,
+          error: null,
+        }));
+        return;
+      }
+    } catch {}
+    if (mountedRef.current) {
+      setState((s) => ({ ...s, loading: false, error: "加载歌单失败" }));
+    }
+  }, []);
+
+  // 播放指定曲目
   const playTrack = useCallback(
     async (index: number) => {
       if (index < 0 || index >= state.playlist.length) return;
@@ -157,33 +212,33 @@ export function useMusicPlayer() {
         error: null,
       }));
 
-      if (state.usingFallback) {
-        // Use synth engine for fallback
-        const { getAudioEngine } = await import("@/lib/audio-engine");
-        const engine = getAudioEngine();
-        await engine.init();
-        engine.playTrack(index);
-        setState((s) => ({ ...s, isPlaying: true }));
-        return;
-      }
-
-      // Get real URL and play
       try {
         const url = await getSongUrl(track.id);
         if (url) {
+          skipCountRef.current = 0;
           await player.play(url, track.id, track.duration);
           setState((s) => ({ ...s, isPlaying: true }));
         } else {
+          // 自动跳过不可播歌曲
+          skipCountRef.current++;
           setState((s) => ({
             ...s,
-            error: "该歌曲暂无播放源（可能需要 VIP 或已下架）",
+            error: `${track.name} 暂无播放源，自动跳过`,
           }));
+          if (skipCountRef.current < MAX_SKIP) {
+            setTimeout(() => playNextInternal(), 500);
+          } else {
+            setState((s) => ({
+              ...s,
+              error: "连续多首歌曲无法播放，请尝试其他歌单",
+            }));
+          }
         }
       } catch {
         setState((s) => ({ ...s, error: "获取播放地址失败" }));
       }
     },
-    [state.playlist, state.usingFallback]
+    [state.playlist]
   );
 
   const playNextInternal = useCallback(() => {
@@ -210,25 +265,17 @@ export function useMusicPlayer() {
   }, []);
 
   const togglePlay = useCallback(() => {
-    if (state.isPlaying) {
-      pause();
-    } else {
-      if (state.currentTime > 0) {
-        resume();
-      } else {
-        play();
-      }
-    }
+    if (state.isPlaying) pause();
+    else if (state.currentTime > 0) resume();
+    else play();
   }, [state.isPlaying, state.currentTime, play, pause, resume]);
 
   const playNext = useCallback(() => {
-    const nextIdx = (state.currentTrackIndex + 1) % state.playlist.length;
-    playTrack(nextIdx);
-  }, [state.currentTrackIndex, state.playlist.length, playTrack]);
+    playNextInternal();
+  }, [playNextInternal]);
 
   const playPrev = useCallback(() => {
-    const prevIdx =
-      (state.currentTrackIndex - 1 + state.playlist.length) % state.playlist.length;
+    const prevIdx = (state.currentTrackIndex - 1 + state.playlist.length) % state.playlist.length;
     playTrack(prevIdx);
   }, [state.currentTrackIndex, state.playlist.length, playTrack]);
 
@@ -248,8 +295,6 @@ export function useMusicPlayer() {
 
   return {
     ...state,
-    trackCount: state.playlist.length,
-    qualityLabels,
     togglePlay,
     play,
     pause,
@@ -258,5 +303,8 @@ export function useMusicPlayer() {
     setQuality,
     seekTo,
     setVolume,
+    doSearch,
+    searchAndPlay,
+    loadPlaylist,
   };
 }

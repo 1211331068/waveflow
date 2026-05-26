@@ -20,11 +20,24 @@ const searchModule = req("NeteaseCloudMusicApi/module/search.js");
 const songUrlModule = req("NeteaseCloudMusicApi/module/song_url_v1.js");
 const playlistModule = req("NeteaseCloudMusicApi/module/playlist_track_all.js");
 
+// 🇨🇳 中国 IP 池 - 伪装请求来源，解决海外服务器播放限制
+const CN_IPS = [
+  "116.25.146.101", "58.60.1.24", "113.68.153.86",
+  "120.229.45.42", "183.6.100.88", "223.104.1.25",
+  "112.96.109.102", "117.136.79.10", "36.110.147.28",
+  "111.206.94.146", "221.219.99.186", "123.120.193.98",
+];
+
+function randomCNIP(): string {
+  return CN_IPS[Math.floor(Math.random() * CN_IPS.length)];
+}
+
 function invoke(
   mod: (query: any, request: any) => Promise<any>,
   data: Record<string, any> = {}
 ) {
-  return mod(data, requestFn);
+  // 加入中国 IP 伪装，绕过海外播放限制
+  return mod({ ...data, realIP: randomCNIP() }, requestFn);
 }
 
 export async function searchSongs(keywords: string, limit = 30) {

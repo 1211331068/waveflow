@@ -6,7 +6,15 @@ export interface SongInfo {
   album: string;
   albumPic: string;
   duration: number; // seconds
-  url?: string;      // 播放地址（获取后填充）
+  url?: string;
+}
+
+export interface PlaylistInfo {
+  id: number;
+  name: string;
+  coverImgUrl: string;
+  description: string;
+  trackCount: number;
 }
 
 export type QualityPreset = "lofi" | "standard" | "high" | "lossless";
@@ -33,7 +41,7 @@ export async function getSongUrl(id: number): Promise<string | null> {
   return data.url || null;
 }
 
-export async function getHotPlaylist(id?: number): Promise<SongInfo[]> {
+export async function getPlaylistSongs(id?: number): Promise<SongInfo[]> {
   const url = id ? `${BASE}/playlist?id=${id}` : `${BASE}/playlist`;
   const res = await fetch(url);
   const data = await res.json();
@@ -46,24 +54,26 @@ export const hotKeywords = [
   "Taylor Swift", "周深", "五月天", "告五人", "李荣浩",
 ];
 
-// ========== 内置后备歌曲（合成音乐） ==========
-export interface FallbackTrack {
-  id: number;
-  name: string;
-  artists: string[];
-  album: string;
-  duration: number;
-}
+// ========== 热门歌单 ID（网易云真实歌单）==========
+export const hotPlaylists: PlaylistInfo[] = [
+  { id: 3778678, name: "热歌榜", coverImgUrl: "", description: "云音乐热歌榜", trackCount: 200 },
+  { id: 2884035, name: "官方榜", coverImgUrl: "", description: "云音乐新歌榜", trackCount: 100 },
+  { id: 19723756, name: "飙升榜", coverImgUrl: "", description: "云音乐飙升榜", trackCount: 100 },
+  { id: 3779629, name: "新歌榜", coverImgUrl: "", description: "云音乐新歌榜", trackCount: 100 },
+  { id: 4395559, name: "欧美热歌", coverImgUrl: "", description: "欧美最热单曲", trackCount: 200 },
+  { id: 745956260, name: "华语精选", coverImgUrl: "", description: "华语精选歌单", trackCount: 160 },
+  { id: 6683129, name: "电子精选", coverImgUrl: "", description: "电子音乐精选", trackCount: 120 },
+  { id: 2645297116, name: "轻音乐", coverImgUrl: "", description: "治愈系轻音乐", trackCount: 80 },
+];
 
-export function getFallbackTracks(): FallbackTrack[] {
-  return [
-    { id: -1, name: "星空下的约定", artists: ["林夜"], album: "星河万里", duration: 225 },
-    { id: -2, name: "Electric Dreams", artists: ["Synth Collective"], album: "Neon Nights", duration: 252 },
-    { id: -3, name: "城市孤岛", artists: ["陈默"], album: "无声告白", duration: 245 },
-    { id: -4, name: "Whispers in the Wind", artists: ["Luna Wave"], album: "Midnight Echoes", duration: 208 },
-    { id: -5, name: "极光之下", artists: ["北极星乐队"], album: "追光者", duration: 270 },
-    { id: -6, name: "Golden Hour", artists: ["Aria Chen"], album: "Desert Bloom", duration: 235 },
-    { id: -7, name: "雨后初晴", artists: ["小野丽莎"], album: "温柔时光", duration: 258 },
-    { id: -8, name: "Dark Matter", artists: ["Echo Lab"], album: "Quantum Drift", duration: 302 },
-  ];
-}
+// ========== 推荐搜索 ==========
+export const discoverSearches = [
+  { keyword: "周杰伦", label: "🎤 周杰伦", color: "from-amber-500 to-orange-600" },
+  { keyword: "林俊杰", label: "🎹 林俊杰", color: "from-blue-500 to-cyan-600" },
+  { keyword: "邓紫棋", label: "🌟 邓紫棋", color: "from-purple-500 to-pink-600" },
+  { keyword: "陈奕迅", label: "🎭 陈奕迅", color: "from-emerald-500 to-teal-600" },
+  { keyword: "Taylor Swift", label: "🎸 Taylor Swift", color: "from-rose-500 to-red-600" },
+  { keyword: "五月天", label: "🎸 五月天", color: "from-indigo-500 to-violet-600" },
+  { keyword: "薛之谦", label: "🎵 薛之谦", color: "from-teal-500 to-green-600" },
+  { keyword: "周深", label: "🎶 周深", color: "from-pink-500 to-rose-600" },
+];
