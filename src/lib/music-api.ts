@@ -9,6 +9,17 @@ export interface SongInfo {
   url?: string;
 }
 
+export interface LyricLine {
+  time: number; // 秒
+  text: string;
+  ttext?: string; // 翻译文本（英文歌双语）
+}
+
+export interface LyricData {
+  lines: LyricLine[];
+  hasTranslation: boolean;
+}
+
 export interface CategoryInfo {
   id: string;
   name: string;
@@ -50,6 +61,72 @@ export async function getPlaylistSongs(id?: number): Promise<SongInfo[]> {
   return data.songs || [];
 }
 
+// 获取歌词并解析 LRC 格式
+export async function getLyrics(id: number): Promise<LyricData | null> {
+  try {
+    const res = await fetch(`${BASE}/lyric?id=${id}`);
+    const data = await res.json();
+    if (!data.success || !data.lyric) return null;
+    return parseLRC(data.lyric, data.tlyric);
+  } catch {
+    return null;
+  }
+}
+
+// 解析 LRC 歌词格式为结构化数据
+function parseLRC(lrc: string, tlrc?: string): LyricData {
+  const lines: LyricLine[] = [];
+  const timeReg = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/g;
+
+  // 解析原文歌词
+  const lrcLines = lrc.split("\n");
+  for (const line of lrcLines) {
+    const match = timeReg.exec(line);
+    if (match) {
+      const mins = parseInt(match[1]);
+      const secs = parseInt(match[2]);
+      const ms = parseInt(match[3].padEnd(3, "0"));
+      const time = mins * 60 + secs + ms / 1000;
+      const text = line.replace(timeReg, "").trim();
+      if (text) {
+        lines.push({ time, text });
+      }
+    }
+  }
+
+  // 解析翻译歌词
+  if (tlrc) {
+    const tlines = tlrc.split("\n");
+    const tmap: Record<number, string> = {};
+    for (const line of tlines) {
+      const match = timeReg.exec(line);
+      if (match) {
+        const mins = parseInt(match[1]);
+        const secs = parseInt(match[2]);
+        const ms = parseInt(match[3].padEnd(3, "0"));
+        tmap[mins * 60 + secs + ms / 1000] = line.replace(timeReg, "").trim();
+      }
+    }
+    for (const l of lines) {
+      // 查找最接近时间的翻译
+      const keys = Object.keys(tmap).map(Number).sort((a, b) => a - b);
+      const closest = keys.reduce((prev, curr) =>
+        Math.abs(curr - l.time) < Math.abs(prev - l.time) ? curr : prev
+      );
+      if (Math.abs(closest - l.time) < 1) {
+        l.ttext = tmap[closest];
+      }
+    }
+  }
+
+  const hasTranslation = lines.some(l => !!l.ttext);
+
+  // 按时间排序
+  lines.sort((a, b) => a.time - b.time);
+
+  return { lines, hasTranslation };
+}
+
 // ========== 歌单分类（正确分类 + 真实歌单ID）==========
 export const categories: CategoryInfo[] = [
   {
@@ -60,6 +137,14 @@ export const categories: CategoryInfo[] = [
     search: "热歌",
     playlistId: 3778678,
     desc: "云音乐官方热歌榜 · 实时更新",
+  },
+  {
+    id: "jaychou",
+    name: "周杰伦",
+    icon: "🎹",
+    color: "from-amber-500 via-orange-500 to-red-600",
+    search: "周杰伦",
+    desc: "周杰伦热门歌曲 · 经典必听",
   },
   {
     id: "rap",
@@ -166,21 +251,21 @@ export const categories: CategoryInfo[] = [
 export const hotKeywords = [
   "周杰伦", "林俊杰", "邓紫棋", "陈奕迅", "薛之谦",
   "Taylor Swift", "The Weeknd", "Drake", "Ed Sheeran", "Billie Eilish",
-  "phonk", "lofi", "chill", "BTS", "NewJeans",
+  "phonk drift", "lofi study", "chill", "BTS", "NewJeans",
 ];
 
 // ========== 推荐艺人 ==========
 export const discoverArtists = [
-  { keyword: "周杰伦", label: "🎤 周杰伦", color: "from-amber-500 to-orange-600" },
+  { keyword: "周杰伦", label: "🎹 周杰伦", color: "from-amber-500 to-orange-600" },
   { keyword: "Taylor Swift", label: "🌟 Taylor Swift", color: "from-blue-500 to-indigo-600" },
-  { keyword: "林俊杰", label: "🎹 林俊杰", color: "from-cyan-500 to-teal-600" },
+  { keyword: "林俊杰", label: "🎤 林俊杰", color: "from-cyan-500 to-teal-600" },
   { keyword: "The Weeknd", label: "🌙 The Weeknd", color: "from-red-600 to-rose-700" },
   { keyword: "邓紫棋", label: "💎 邓紫棋", color: "from-purple-500 to-pink-600" },
   { keyword: "BTS", label: "💜 BTS", color: "from-violet-500 to-purple-700" },
   { keyword: "陈奕迅", label: "🎭 陈奕迅", color: "from-emerald-500 to-teal-600" },
   { keyword: "Ed Sheeran", label: "🎸 Ed Sheeran", color: "from-orange-500 to-red-600" },
   { keyword: "薛之谦", label: "🎵 薛之谦", color: "from-teal-500 to-green-600" },
-  { keyword: "Billie Eilish", label: "👁 Billie Eilish", color: "from-green-500 to-emerald-700" },
   { keyword: "五月天", label: "🎸 五月天", color: "from-indigo-500 to-blue-600" },
+  { keyword: "Billie Eilish", label: "👁 Billie Eilish", color: "from-green-500 to-emerald-700" },
   { keyword: "NewJeans", label: "🐰 NewJeans", color: "from-pink-400 to-rose-500" },
 ];

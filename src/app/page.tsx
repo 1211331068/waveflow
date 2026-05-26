@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useMusicPlayer } from "@/hooks/useMusicPlayer";
 import type { QualityPreset, CategoryInfo } from "@/lib/music-api";
 import { qualityLabels, categories, discoverArtists } from "@/lib/music-api";
+import LyricView from "@/components/lyric-view";
 
 // ═══ Icons ═══
 const I = {
@@ -61,18 +62,37 @@ function SongRow({ song, idx, act, playing, onPlay, onLike, liked }: any) {
   );
 }
 
-// ═══ Category Card (with cover attempt) ═══
+// ═══ Category Card (with real album cover) ═══
 function CategoryCard({ cat, onClick }: { cat: CategoryInfo; onClick: () => void }) {
+  const [cover, setCover] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!cat.playlistId) return;
+    let cancelled = false;
+    fetch(`/api/music/playlist?id=${cat.playlistId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!cancelled && data.songs?.length > 0) {
+          setCover(data.songs[0].albumPic);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [cat.playlistId]);
+
   return (
     <button onClick={onClick}
       className={`group relative w-full aspect-[4/3] rounded-2xl bg-gradient-to-br ${cat.color} overflow-hidden shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-all duration-300`}>
+      {cover && (
+        <img src={cover} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40 group-hover:opacity-30 transition-opacity duration-500" />
+      )}
       <div className="absolute inset-0 bg-black/20 group-hover:bg-black/10 transition-colors" />
-      <span className="absolute top-4 left-4 text-3xl">{cat.icon}</span>
-      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 via-black/30 to-transparent">
+      <span className="absolute top-4 left-4 text-3xl z-10">{cat.icon}</span>
+      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent z-10">
         <h3 className="text-base font-bold text-white">{cat.name}</h3>
         <p className="text-xs text-white/70 mt-0.5">{cat.desc}</p>
       </div>
-      <div className="absolute bottom-3 right-3 w-10 h-10 rounded-full bg-white/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-y-2 group-hover:translate-y-0 backdrop-blur-sm">
+      <div className="absolute bottom-3 right-3 w-10 h-10 rounded-full bg-white/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-y-2 group-hover:translate-y-0 backdrop-blur-sm z-10">
         <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
       </div>
     </button>
@@ -88,6 +108,7 @@ export default function Home() {
   const [view, setView] = useState<"home"|"search"|"library">("home");
   const [search, setSearch] = useState("");
   const [catName, setCatName] = useState("");
+  const [showLyrics, setShowLyrics] = useState(false);
   const pr = useRef<HTMLDivElement>(null);
   const tm = useRef<NodeJS.Timeout | null>(null);
 
@@ -166,7 +187,12 @@ export default function Home() {
                 {p.currentTrack && (
                   <section className="relative overflow-hidden rounded-3xl p-5 sm:p-8 bg-gradient-to-br from-purple-950/40 via-violet-950/30 to-fuchsia-950/40 border border-white/[0.04] backdrop-blur-sm animate-slide-up">
                     <div className="relative z-10 flex flex-col sm:flex-row items-start sm:items-center gap-6">
-                      <Cover src={p.currentTrack.albumPic} name={p.currentTrack.name} sz="xl" />
+                      <button onClick={() => { p.fetchLyrics(); setShowLyrics(true); }} className="cursor-pointer group relative">
+                        <Cover src={p.currentTrack.albumPic} name={p.currentTrack.name} sz="xl" />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 rounded-xl flex items-center justify-center transition-all">
+                          <span className="opacity-0 group-hover:opacity-100 text-white text-xs font-medium bg-black/50 px-3 py-1.5 rounded-full backdrop-blur-sm transition-all">查看歌词</span>
+                        </div>
+                      </button>
                       <div className="min-w-0 flex-1">
                         <p className="text-xs text-zinc-400 mb-1 tracking-wide">{greet()}，来听首歌吧</p>
                         <h2 className="text-2xl sm:text-3xl font-bold mb-2 truncate">{p.currentTrack.name}</h2>
@@ -260,7 +286,11 @@ export default function Home() {
       <div className="fixed bottom-0 left-0 right-0 h-[68px] bg-black/30 backdrop-blur-xl border-t border-white/[0.04] z-50">
         <div className="h-full px-3 sm:px-4 flex items-center gap-3">
           <div className="flex items-center gap-3 min-w-[120px] sm:min-w-[180px] max-w-[240px]">
-            {p.currentTrack ? <Cover src={p.currentTrack.albumPic} name={p.currentTrack.name} sz="sm" /> : <div className="w-12 h-12 rounded-xl bg-white/[0.02] flex items-center justify-center">{I.music}</div>}
+            {p.currentTrack ? (
+              <button onClick={() => { p.fetchLyrics(); setShowLyrics(true); }} className="cursor-pointer group relative flex-shrink-0">
+                <Cover src={p.currentTrack.albumPic} name={p.currentTrack.name} sz="sm" />
+              </button>
+            ) : <div className="w-12 h-12 rounded-xl bg-white/[0.02] flex items-center justify-center">{I.music}</div>}
             <div className="min-w-0 hidden sm:block"><p className="text-sm font-semibold truncate">{p.currentTrack?.name || "WaveFlow"}</p><p className="text-xs text-zinc-500 truncate">{p.currentTrack?.artists?.join(" / ") || "选择歌曲开始"}</p></div>
             {p.currentTrack && <button onClick={() => toggleLike(p.currentTrack!.id)} className={`p-1 ${liked.includes(p.currentTrack.id)?"text-pink-400":"text-zinc-600 hover:text-zinc-400"}`}>{liked.includes(p.currentTrack.id)?I.heartFill:I.heart}</button>}
           </div>
@@ -285,6 +315,29 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* ──── 歌词视图 ──── */}
+      {showLyrics && p.currentTrack && (
+        <LyricView
+          lyrics={p.lyrics}
+          loading={p.lyricsLoading}
+          currentTime={p.currentTime}
+          duration={p.duration}
+          songName={p.currentTrack.name}
+          artists={p.currentTrack.artists}
+          albumPic={p.currentTrack.albumPic}
+          onClose={() => setShowLyrics(false)}
+          isPlaying={p.isPlaying}
+          onTogglePlay={p.togglePlay}
+          onPlayNext={p.playNext}
+          onPlayPrev={p.playPrev}
+          quality={p.quality}
+          onSetQuality={p.setQuality}
+          onSeekTo={p.seekTo}
+          volume={vol}
+          onSetVolume={(v: number) => { setVol(v); setMuted(false); p.setVolume(v); }}
+        />
+      )}
     </div>
   );
 }

@@ -7,8 +7,11 @@ import {
   getSongUrl,
   searchSongs,
   hotKeywords,
+  getLyrics,
+  categories,
   type SongInfo,
   type QualityPreset,
+  type LyricData,
 } from "@/lib/music-api";
 
 interface PlayerState {
@@ -24,6 +27,8 @@ interface PlayerState {
   error: string | null;
   searchResults: SongInfo[];
   searching: boolean;
+  lyrics: LyricData | null;
+  lyricsLoading: boolean;
 }
 
 const MAX_SKIP = 10;
@@ -54,6 +59,8 @@ export function useMusicPlayer() {
     error: null,
     searchResults: [],
     searching: false,
+    lyrics: null,
+    lyricsLoading: false,
   });
 
   // ─── 核心：安全播放一首歌 ───
@@ -73,6 +80,7 @@ export function useMusicPlayer() {
       duration: track.duration,
       currentTime: 0,
       error: null,
+      lyrics: null,
     }));
 
     try {
@@ -265,7 +273,7 @@ export function useMusicPlayer() {
   }, []);
 
   const searchAndPlay = useCallback(async (keyword: string) => {
-    setState((s) => ({ ...s, loading: true }));
+    setState((s) => ({ ...s, loading: true, error: null }));
     try {
       const songs = await searchSongs(keyword, 30);
       if (mountedRef.current && songs.length > 0) {
@@ -279,12 +287,21 @@ export function useMusicPlayer() {
         }));
         return;
       }
-    } catch {}
-    if (mountedRef.current) setState((s) => ({ ...s, loading: false, error: "搜索无结果" }));
+      // 无结果 → 清空歌单
+      if (mountedRef.current) {
+        playlistRef.current = [];
+        setState((s) => ({ ...s, playlist: [], loading: false, error: "搜索无结果，换个关键词试试" }));
+      }
+    } catch {
+      if (mountedRef.current) {
+        playlistRef.current = [];
+        setState((s) => ({ ...s, playlist: [], loading: false, error: "搜索失败" }));
+      }
+    }
   }, []);
 
   const loadPlaylist = useCallback(async (playlistId: number) => {
-    setState((s) => ({ ...s, loading: true }));
+    setState((s) => ({ ...s, loading: true, error: null }));
     try {
       const songs = await getPlaylistSongs(playlistId);
       if (mountedRef.current && songs.length > 0) {
@@ -298,8 +315,50 @@ export function useMusicPlayer() {
         }));
         return;
       }
-    } catch {}
-    if (mountedRef.current) setState((s) => ({ ...s, loading: false, error: "加载歌单失败" }));
+      // 歌单无结果 → 清空旧歌单，回退到搜索
+      if (mountedRef.current) {
+        const cat = categories.find(c => c.playlistId === playlistId);
+        if (cat) {
+          // 用搜索关键词回退
+          try {
+            const fallback = await searchSongs(cat.search, 30);
+            if (fallback.length > 0) {
+              playlistRef.current = fallback;
+              setState((s) => ({
+                ...s, playlist: fallback, currentTrack: fallback[0], currentTrackIndex: 0,
+                duration: fallback[0].duration, loading: false, isReady: true, error: null,
+              }));
+              return;
+            }
+          } catch {}
+        }
+        // 完全失败 → 清空歌单
+        playlistRef.current = [];
+        setState((s) => ({ ...s, playlist: [], loading: false, error: "该歌单暂无可用歌曲" }));
+      }
+    } catch {
+      if (mountedRef.current) {
+        playlistRef.current = [];
+        setState((s) => ({ ...s, playlist: [], loading: false, error: "加载歌单失败，请检查网络" }));
+      }
+    }
+  }, []);
+
+  // 🎤 获取当前歌曲歌词
+  const fetchLyrics = useCallback(async () => {
+    const track = playlistRef.current[currentIndexRef.current];
+    if (!track) return;
+    setState((s) => ({ ...s, lyricsLoading: true }));
+    try {
+      const data = await getLyrics(track.id);
+      if (mountedRef.current) {
+        setState((s) => ({ ...s, lyrics: data, lyricsLoading: false }));
+      }
+    } catch {
+      if (mountedRef.current) {
+        setState((s) => ({ ...s, lyrics: null, lyricsLoading: false }));
+      }
+    }
   }, []);
 
   return {
@@ -307,5 +366,6 @@ export function useMusicPlayer() {
     togglePlay, play, pause, playNext, playPrev,
     setQuality, seekTo, setVolume,
     doSearch, searchAndPlay, loadPlaylist,
+    fetchLyrics,
   };
 }

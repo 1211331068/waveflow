@@ -1,5 +1,5 @@
 // 绕过 NeteaseCloudMusicApi 的 main.js（它加载全部 377 个模块，在 Vercel 上会失败）
-// 这里只加载我们需要的 3 个模块 + 共享依赖
+// 这里只加载我们需要的 4 个模块 + 共享依赖
 
 import { createRequire } from "node:module";
 import { existsSync, writeFileSync } from "node:fs";
@@ -19,6 +19,7 @@ const requestFn = req("NeteaseCloudMusicApi/util/request.js");
 const searchModule = req("NeteaseCloudMusicApi/module/search.js");
 const songUrlModule = req("NeteaseCloudMusicApi/module/song_url_v1.js");
 const playlistModule = req("NeteaseCloudMusicApi/module/playlist_track_all.js");
+const lyricModule = req("NeteaseCloudMusicApi/module/lyric.js");
 
 // 🇨🇳 中国 IP 池 - 伪装请求来源，解决海外服务器播放限制
 const CN_IPS = [
@@ -32,20 +33,35 @@ function randomCNIP(): string {
   return CN_IPS[Math.floor(Math.random() * CN_IPS.length)];
 }
 
+// 🍪 VIP Cookie 支持（通过环境变量 NETEASE_COOKIE 传入）
+function getCookie(): string | undefined {
+  return process.env.NETEASE_COOKIE || undefined;
+}
+
 function invoke(
   mod: (query: any, request: any) => Promise<any>,
   data: Record<string, any> = {}
 ) {
-  // 加入中国 IP 伪装，绕过海外播放限制
-  return mod({ ...data, realIP: randomCNIP() }, requestFn);
+  const cookie = getCookie();
+  const params: Record<string, any> = { ...data, realIP: randomCNIP() };
+  if (cookie) {
+    params.cookie = cookie;
+  }
+  return mod(params, requestFn);
 }
 
 export async function searchSongs(keywords: string, limit = 30) {
   return invoke(searchModule, { keywords, limit, type: 1 });
 }
 
+// 尝试多个音质级别获取播放 URL（VIP 可用更高音质）
 export async function getSongUrl(id: number, level = "exhigh") {
   return invoke(songUrlModule, { id, level });
+}
+
+// 获取歌词
+export async function getLyrics(id: number) {
+  return invoke(lyricModule, { id });
 }
 
 export async function getPlaylistTracks(playlistId = 3778678) {
