@@ -1,14 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-let _search: ((params: any) => Promise<any>) | null = null;
-
-async function getApi() {
-  if (!_search) {
-    const mod = await import("NeteaseCloudMusicApi");
-    _search = (mod as any).search || (mod as any).default?.search;
-  }
-  return _search;
-}
+import { searchSongs } from "@/lib/netease-api";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -16,14 +7,7 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(searchParams.get("limit") || "30");
 
   try {
-    const search = await getApi();
-    if (!search) {
-      return NextResponse.json(
-        { success: false, error: "API module not loaded" },
-        { status: 500 }
-      );
-    }
-    const result = await search({ keywords, limit, type: 1 });
+    const result = await searchSongs(keywords, limit);
     const songs = (result.body?.result?.songs || []).map((s: Record<string, any>) => ({
       id: s.id,
       name: s.name,
@@ -39,11 +23,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const stack = e instanceof Error ? e.stack : "";
-    console.error("Search error:", message, stack);
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 }
-    );
+    console.error("Search error:", message);
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
