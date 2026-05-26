@@ -24,15 +24,22 @@ interface PlayerState {
   error: string | null;
   searchResults: SongInfo[];
   searching: boolean;
-  searchError: string | null;
 }
 
+const MAX_SKIP = 10;
+
 export function useMusicPlayer() {
-  const player = useRef(getAudioPlayer()).current;
-  const playIndexRef = useRef(0);
+  const playerRef = useRef(getAudioPlayer());
+  const player = playerRef.current;
+
+  // ⚡ 关键：用 ref 保存 playlist，避免 useCallback 闭包过期
+  const playlistRef = useRef<SongInfo[]>([]);
+  const currentIndexRef = useRef(0);
   const mountedRef = useRef(true);
+  const skippingRef = useRef(false); // 防双重跳过
   const skipCountRef = useRef(0);
-  const MAX_SKIP = 10; // 最多连续跳过 10 首
+  const errorHandledRef = useRef(false); // 防 error 事件重复处理
+  const pendingPlayRef = useRef(false); // 防并发 play 调用
 
   const [state, setState] = useState<PlayerState>({
     isPlaying: false,
@@ -47,44 +54,106 @@ export function useMusicPlayer() {
     error: null,
     searchResults: [],
     searching: false,
-    searchError: null,
   });
 
-  // 加载歌单
+  // ─── 核心：安全播放一首歌 ───
+  const playOneTrack = useCallback(async (index: number) => {
+    const playlist = playlistRef.current;
+    if (index < 0 || index >= playlist.length) return;
+    if (pendingPlayRef.current) return; // 防止并发
+
+    const track = playlist[index];
+    currentIndexRef.current = index;
+    pendingPlayRef.current = true;
+
+    setState((s) => ({
+      ...s,
+      currentTrack: track,
+      currentTrackIndex: index,
+      duration: track.duration,
+      currentTime: 0,
+      error: null,
+    }));
+
+    try {
+      const url = await getSongUrl(track.id);
+      if (!mountedRef.current) { pendingPlayRef.current = false; return; }
+
+      if (url) {
+        skipCountRef.current = 0;
+        await player.play(url, track.id, track.duration);
+        if (mountedRef.current) {
+          setState((s) => ({ ...s, isPlaying: true }));
+        }
+      } else {
+        // 无播放源 → 自动跳过（唯一跳过入口）
+        skipCountRef.current++;
+        pendingPlayRef.current = false;
+        if (mountedRef.current) {
+          setState((s) => ({ ...s, error: `${track.name} 暂无播放源` }));
+        }
+        if (skipCountRef.current < MAX_SKIP) {
+          setTimeout(() => {
+            if (mountedRef.current) {
+              const next = (index + 1) % playlistRef.current.length;
+              playOneTrack(next);
+            }
+          }, 600);
+        } else {
+          skipCountRef.current = 0;
+          if (mountedRef.current) {
+            setState((s) => ({ ...s, error: "当前歌单大部分歌曲无法播放，请尝试其他歌单" }));
+          }
+        }
+      }
+    } catch (e: unknown) {
+      pendingPlayRef.current = false;
+      if (mountedRef.current) {
+        const msg = e instanceof Error ? e.message : "播放出错";
+        setState((s) => ({ ...s, error: msg }));
+      }
+    }
+  }, [player]);
+
+  // ─── 播放下一首（由 onEnded 触发，不自动跳过）───
+  const playNextSafe = useCallback(() => {
+    if (skippingRef.current) return;
+    const next = (currentIndexRef.current + 1) % playlistRef.current.length;
+    pendingPlayRef.current = false; // 重置
+    playOneTrack(next);
+  }, [playOneTrack]);
+
+  // ─── 初始化 ───
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
 
-    async function loadSongs() {
+    const initAndLoad = async () => {
+      await player.init();
+      if (cancelled || !mountedRef.current) return;
+
       setState((s) => ({ ...s, loading: true }));
       try {
         const songs = await getPlaylistSongs();
         if (!cancelled && songs.length > 0) {
+          playlistRef.current = songs;
           setState((s) => ({
-            ...s,
-            playlist: songs,
-            loading: false,
-            isReady: true,
-            currentTrack: songs[0],
-            duration: songs[0].duration,
+            ...s, playlist: songs, loading: false, isReady: true,
+            currentTrack: songs[0], duration: songs[0].duration,
           }));
           return;
         }
       } catch {}
 
-      // 备用：随机搜索热门关键词
       if (!cancelled) {
         try {
-          const keyword = hotKeywords[Math.floor(Math.random() * hotKeywords.length)];
-          const songs = await searchSongs(keyword, 20);
+          const kw = hotKeywords[Math.floor(Math.random() * hotKeywords.length)];
+          const songs = await searchSongs(kw, 20);
           if (songs.length > 0) {
+            playlistRef.current = songs;
             setState((s) => ({
-              ...s,
-              playlist: songs,
-              loading: false,
-              isReady: true,
-              currentTrack: songs[0],
-              duration: songs[0].duration,
+              ...s, playlist: songs, loading: false, isReady: true,
+              currentTrack: songs[0], duration: songs[0].duration,
             }));
             return;
           }
@@ -92,177 +161,60 @@ export function useMusicPlayer() {
       }
 
       if (!cancelled) {
-        setState((s) => ({ ...s, loading: false, error: "暂无可用歌曲，请稍后重试" }));
+        setState((s) => ({ ...s, loading: false, error: "暂无可用歌曲" }));
       }
-    }
+    };
 
-    player.init().then(() => {
-      if (mountedRef.current) loadSongs();
-    });
+    initAndLoad();
 
+    // 时间更新
     player.onTimeUpdate((t) => {
       if (mountedRef.current) setState((s) => ({ ...s, currentTime: t }));
     });
 
+    // 播放结束 → 下一首（不自动跳过无源的）
     player.onEnded(() => {
-      if (mountedRef.current) playNextInternal();
+      if (mountedRef.current) playNextSafe();
     });
 
-    player.onError(() => {
-      if (mountedRef.current) {
-        skipCountRef.current++;
-        if (skipCountRef.current < MAX_SKIP) {
-          playNextInternal();
-        } else {
-          setState((s) => ({ ...s, error: "连续多首歌曲无法播放，请尝试搜索其他歌曲" }));
-          skipCountRef.current = 0;
-        }
-      }
+    // 音频错误 → 下一首
+    player.onError((msg) => {
+      if (!mountedRef.current) return;
+      if (errorHandledRef.current) return;
+      errorHandledRef.current = true;
+      setState((s) => ({ ...s, error: msg }));
+      setTimeout(() => {
+        errorHandledRef.current = false;
+        if (mountedRef.current) playNextSafe();
+      }, 300);
     });
 
     return () => {
       mountedRef.current = false;
       cancelled = true;
-      player.stop();
+      try { player.stop(); } catch {}
     };
-  }, []);
+  }, [player, playNextSafe]);
 
-  // 🔍 搜索功能
-  const doSearch = useCallback(async (keyword: string) => {
-    if (!keyword.trim()) {
-      setState((s) => ({ ...s, searchResults: [], searching: false }));
-      return;
+  // ─── 公开 API ───
+  const play = useCallback((index?: number) => {
+    const idx = index ?? currentIndexRef.current;
+    if (idx >= 0 && idx < playlistRef.current.length) {
+      pendingPlayRef.current = false;
+      skipCountRef.current = 0;
+      playOneTrack(idx);
     }
-    setState((s) => ({ ...s, searching: true, searchError: null }));
-    try {
-      const songs = await searchSongs(keyword, 30);
-      if (mountedRef.current) {
-        setState((s) => ({ ...s, searchResults: songs, searching: false }));
-      }
-    } catch {
-      if (mountedRef.current) {
-        setState((s) => ({ ...s, searching: false, searchError: "搜索失败，请重试" }));
-      }
-    }
-  }, []);
-
-  // 🎵 搜索并替换播放列表
-  const searchAndPlay = useCallback(async (keyword: string) => {
-    setState((s) => ({ ...s, loading: true }));
-    try {
-      const songs = await searchSongs(keyword, 30);
-      if (mountedRef.current && songs.length > 0) {
-        skipCountRef.current = 0;
-        setState((s) => ({
-          ...s,
-          playlist: songs,
-          currentTrack: songs[0],
-          currentTrackIndex: 0,
-          duration: songs[0].duration,
-          loading: false,
-          isReady: true,
-          error: null,
-        }));
-        return;
-      }
-    } catch {}
-    if (mountedRef.current) {
-      setState((s) => ({ ...s, loading: false, error: "搜索无结果" }));
-    }
-  }, []);
-
-  // 加载歌单并替换
-  const loadPlaylist = useCallback(async (playlistId: number) => {
-    setState((s) => ({ ...s, loading: true }));
-    try {
-      const songs = await getPlaylistSongs(playlistId);
-      if (mountedRef.current && songs.length > 0) {
-        skipCountRef.current = 0;
-        setState((s) => ({
-          ...s,
-          playlist: songs,
-          currentTrack: songs[0],
-          currentTrackIndex: 0,
-          duration: songs[0].duration,
-          loading: false,
-          isReady: true,
-          error: null,
-        }));
-        return;
-      }
-    } catch {}
-    if (mountedRef.current) {
-      setState((s) => ({ ...s, loading: false, error: "加载歌单失败" }));
-    }
-  }, []);
-
-  // 播放指定曲目
-  const playTrack = useCallback(
-    async (index: number) => {
-      if (index < 0 || index >= state.playlist.length) return;
-
-      const track = state.playlist[index];
-      playIndexRef.current = index;
-      setState((s) => ({
-        ...s,
-        currentTrack: track,
-        currentTrackIndex: index,
-        duration: track.duration,
-        currentTime: 0,
-        error: null,
-      }));
-
-      try {
-        const url = await getSongUrl(track.id);
-        if (url) {
-          skipCountRef.current = 0;
-          await player.play(url, track.id, track.duration);
-          setState((s) => ({ ...s, isPlaying: true }));
-        } else {
-          // 自动跳过不可播歌曲
-          skipCountRef.current++;
-          setState((s) => ({
-            ...s,
-            error: `${track.name} 暂无播放源，自动跳过`,
-          }));
-          if (skipCountRef.current < MAX_SKIP) {
-            setTimeout(() => playNextInternal(), 500);
-          } else {
-            setState((s) => ({
-              ...s,
-              error: "连续多首歌曲无法播放，请尝试其他歌单",
-            }));
-          }
-        }
-      } catch {
-        setState((s) => ({ ...s, error: "获取播放地址失败" }));
-      }
-    },
-    [state.playlist]
-  );
-
-  const playNextInternal = useCallback(() => {
-    const nextIdx = (playIndexRef.current + 1) % state.playlist.length;
-    playTrack(nextIdx);
-  }, [state.playlist.length, playTrack]);
-
-  const play = useCallback(
-    (index?: number) => {
-      const idx = index ?? state.currentTrackIndex;
-      playTrack(idx);
-    },
-    [state.currentTrackIndex, playTrack]
-  );
+  }, [playOneTrack]);
 
   const pause = useCallback(() => {
-    player.pause();
+    try { player.pause(); } catch {}
     setState((s) => ({ ...s, isPlaying: false }));
-  }, []);
+  }, [player]);
 
   const resume = useCallback(() => {
-    player.resume();
+    try { player.resume(); } catch {}
     setState((s) => ({ ...s, isPlaying: true }));
-  }, []);
+  }, [player]);
 
   const togglePlay = useCallback(() => {
     if (state.isPlaying) pause();
@@ -271,40 +223,89 @@ export function useMusicPlayer() {
   }, [state.isPlaying, state.currentTime, play, pause, resume]);
 
   const playNext = useCallback(() => {
-    playNextInternal();
-  }, [playNextInternal]);
+    pendingPlayRef.current = false;
+    skipCountRef.current = 0;
+    playNextSafe();
+  }, [playNextSafe]);
 
   const playPrev = useCallback(() => {
-    const prevIdx = (state.currentTrackIndex - 1 + state.playlist.length) % state.playlist.length;
-    playTrack(prevIdx);
-  }, [state.currentTrackIndex, state.playlist.length, playTrack]);
+    pendingPlayRef.current = false;
+    skipCountRef.current = 0;
+    const prev = (currentIndexRef.current - 1 + playlistRef.current.length) % playlistRef.current.length;
+    playOneTrack(prev);
+  }, [playOneTrack]);
 
-  const setQuality = useCallback((quality: QualityPreset) => {
-    player.setQuality(quality);
-    setState((s) => ({ ...s, quality }));
-  }, []);
+  const setQuality = useCallback((q: QualityPreset) => {
+    try { player.setQuality(q); } catch {}
+    setState((s) => ({ ...s, quality: q }));
+  }, [player]);
 
   const seekTo = useCallback((time: number) => {
-    player.seekTo(time);
+    try { player.seekTo(time); } catch {}
     setState((s) => ({ ...s, currentTime: time }));
-  }, []);
+  }, [player]);
 
   const setVolume = useCallback((v: number) => {
-    player.setVolume(Math.min(1, Math.max(0, v)));
+    try { player.setVolume(Math.min(1, Math.max(0, v))); } catch {}
+  }, [player]);
+
+  // 🔍 搜索
+  const doSearch = useCallback(async (keyword: string) => {
+    if (!keyword.trim()) {
+      setState((s) => ({ ...s, searchResults: [], searching: false }));
+      return;
+    }
+    setState((s) => ({ ...s, searching: true }));
+    try {
+      const songs = await searchSongs(keyword, 30);
+      if (mountedRef.current) setState((s) => ({ ...s, searchResults: songs, searching: false }));
+    } catch {
+      if (mountedRef.current) setState((s) => ({ ...s, searching: false }));
+    }
+  }, []);
+
+  const searchAndPlay = useCallback(async (keyword: string) => {
+    setState((s) => ({ ...s, loading: true }));
+    try {
+      const songs = await searchSongs(keyword, 30);
+      if (mountedRef.current && songs.length > 0) {
+        playlistRef.current = songs;
+        currentIndexRef.current = 0;
+        skipCountRef.current = 0;
+        pendingPlayRef.current = false;
+        setState((s) => ({
+          ...s, playlist: songs, currentTrack: songs[0], currentTrackIndex: 0,
+          duration: songs[0].duration, loading: false, isReady: true, error: null,
+        }));
+        return;
+      }
+    } catch {}
+    if (mountedRef.current) setState((s) => ({ ...s, loading: false, error: "搜索无结果" }));
+  }, []);
+
+  const loadPlaylist = useCallback(async (playlistId: number) => {
+    setState((s) => ({ ...s, loading: true }));
+    try {
+      const songs = await getPlaylistSongs(playlistId);
+      if (mountedRef.current && songs.length > 0) {
+        playlistRef.current = songs;
+        currentIndexRef.current = 0;
+        skipCountRef.current = 0;
+        pendingPlayRef.current = false;
+        setState((s) => ({
+          ...s, playlist: songs, currentTrack: songs[0], currentTrackIndex: 0,
+          duration: songs[0].duration, loading: false, isReady: true, error: null,
+        }));
+        return;
+      }
+    } catch {}
+    if (mountedRef.current) setState((s) => ({ ...s, loading: false, error: "加载歌单失败" }));
   }, []);
 
   return {
     ...state,
-    togglePlay,
-    play,
-    pause,
-    playNext,
-    playPrev,
-    setQuality,
-    seekTo,
-    setVolume,
-    doSearch,
-    searchAndPlay,
-    loadPlaylist,
+    togglePlay, play, pause, playNext, playPrev,
+    setQuality, seekTo, setVolume,
+    doSearch, searchAndPlay, loadPlaylist,
   };
 }

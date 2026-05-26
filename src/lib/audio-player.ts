@@ -5,21 +5,18 @@ export class AudioPlayer {
   private ctx: AudioContext | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private masterGain: GainNode | null = null;
-  private analyser: AnalyserNode | null = null;
-
-  // Quality chain
   private lofiFilter: BiquadFilterNode | null = null;
   private exciter: WaveShaperNode | null = null;
   private qualityGain: GainNode | null = null;
 
   private _isPlaying = false;
   private _currentQuality: QualityPreset = "standard";
-  private _currentUrl = "";
   private _duration = 0;
   private _onTimeUpdate: ((t: number) => void) | null = null;
   private _onEnded: (() => void) | null = null;
   private _onError: ((msg: string) => void) | null = null;
   private _rafId: number | null = null;
+  private _playLock = false; // 防止并发 play 调用
 
   get isPlaying() { return this._isPlaying; }
   get currentQuality() { return this._currentQuality; }
@@ -27,36 +24,30 @@ export class AudioPlayer {
 
   async init(): Promise<void> {
     if (this.ctx) return;
+    try {
+      this.ctx = new AudioContext();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = 0.85;
 
-    this.ctx = new AudioContext();
+      this.lofiFilter = this.ctx.createBiquadFilter();
+      this.lofiFilter.type = "lowpass";
+      this.lofiFilter.frequency.value = 20000;
 
-    // Master gain
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.85;
+      this.exciter = this.ctx.createWaveShaper();
+      this.exciter.curve = this.makeLinearCurve();
 
-    // Analyser
-    this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 256;
+      this.qualityGain = this.ctx.createGain();
+      this.qualityGain.gain.value = 1;
 
-    // Quality nodes
-    this.lofiFilter = this.ctx.createBiquadFilter();
-    this.lofiFilter.type = "lowpass";
-    this.lofiFilter.frequency.value = 20000;
+      this.masterGain.connect(this.lofiFilter);
+      this.lofiFilter.connect(this.exciter);
+      this.exciter.connect(this.qualityGain);
+      this.qualityGain.connect(this.ctx.destination);
 
-    this.exciter = this.ctx.createWaveShaper();
-    this.exciter.curve = this.makeLinearCurve();
-
-    this.qualityGain = this.ctx.createGain();
-    this.qualityGain.gain.value = 1;
-
-    // Chain: masterGain → analyser → lofiFilter → exciter → qualityGain → destination
-    this.masterGain.connect(this.analyser);
-    this.analyser.connect(this.lofiFilter);
-    this.lofiFilter.connect(this.exciter);
-    this.exciter.connect(this.qualityGain);
-    this.qualityGain.connect(this.ctx.destination);
-
-    this.applyQuality(this._currentQuality);
+      this.applyQuality(this._currentQuality);
+    } catch (e) {
+      console.warn("AudioContext init failed:", e);
+    }
   }
 
   private makeLinearCurve(): Float32Array<ArrayBuffer> {
@@ -82,7 +73,6 @@ export class AudioPlayer {
   private applyQuality(preset: QualityPreset): void {
     if (!this.ctx || !this.lofiFilter || !this.exciter || !this.masterGain) return;
     const t = this.ctx.currentTime;
-
     switch (preset) {
       case "lofi":
         this.lofiFilter.frequency.setTargetAtTime(1800, t, 0.05);
@@ -107,57 +97,78 @@ export class AudioPlayer {
     }
   }
 
-  async play(url: string, trackId: number, duration: number): Promise<void> {
-    if (!this.ctx) await this.init();
-
-    // Resume context if needed
-    if (this.ctx!.state === "suspended") {
-      await this.ctx!.resume();
-    }
-
-    this.stop();
-
-    this._duration = duration;
-    this._currentUrl = url;
-
-    this.audio = new Audio();
-    this.audio.crossOrigin = "anonymous";
-    this.audio.preload = "auto";
-
-    // Create media element source and connect to gain
-    this.sourceNode = this.ctx!.createMediaElementSource(this.audio!);
-    this.sourceNode.connect(this.masterGain!);
-
-    // Events
-    this.audio.addEventListener("ended", () => {
-      this._isPlaying = false;
-      this.stopTimeUpdates();
-      this._onEnded?.();
-    });
-
-    this.audio.addEventListener("error", () => {
-      this._isPlaying = false;
-      this.stopTimeUpdates();
-      this._onError?.("播放失败，请尝试其他歌曲");
-    });
-
-    this.audio.addEventListener("loadedmetadata", () => {
-      // Use actual duration if available
-      if (this.audio && isFinite(this.audio.duration) && this.audio.duration > 0) {
-        this._duration = this.audio.duration;
-      }
-    });
-
-    this.audio.src = url;
-    this.audio.volume = 1;
+  async play(url: string, _trackId: number, duration: number): Promise<void> {
+    // 防止并发 play
+    if (this._playLock) return;
+    this._playLock = true;
 
     try {
+      if (!this.ctx) await this.init();
+      if (!this.ctx) { this._playLock = false; return; }
+
+      if (this.ctx.state === "suspended") {
+        await this.ctx.resume();
+      }
+
+      // 先完全停止当前播放
+      this.stopInternal();
+
+      this._duration = duration;
+
+      this.audio = new Audio();
+      this.audio.crossOrigin = "anonymous";
+      this.audio.preload = "auto";
+
+      this.sourceNode = this.ctx.createMediaElementSource(this.audio);
+      this.sourceNode.connect(this.masterGain!);
+
+      this.audio.addEventListener("ended", () => {
+        this._isPlaying = false;
+        this.stopTimeUpdates();
+        this._onEnded?.();
+      }, { once: true });
+
+      this.audio.addEventListener("error", () => {
+        if (!this._isPlaying) return; // 已经停止的忽略
+        this._isPlaying = false;
+        this.stopTimeUpdates();
+        this._onError?.("音频加载失败");
+      }, { once: true });
+
+      this.audio.addEventListener("loadedmetadata", () => {
+        if (this.audio && isFinite(this.audio.duration) && this.audio.duration > 0) {
+          this._duration = this.audio.duration;
+        }
+      }, { once: true });
+
+      this.audio.src = url;
+
       await this.audio.play();
       this._isPlaying = true;
       this.startTimeUpdates();
     } catch (e) {
-      console.error("Play error:", e);
-      this._onError?.("播放失败，请重试");
+      this._isPlaying = false;
+      this._onError?.("播放失败");
+    } finally {
+      this._playLock = false;
+    }
+  }
+
+  private stopInternal(): void {
+    this._isPlaying = false;
+    this.stopTimeUpdates();
+
+    if (this.sourceNode) {
+      try { this.sourceNode.disconnect(); } catch {}
+      this.sourceNode = null;
+    }
+    if (this.audio) {
+      try {
+        this.audio.pause();
+        this.audio.src = "";
+        this.audio.load();
+      } catch {}
+      this.audio = null;
     }
   }
 
@@ -197,29 +208,19 @@ export class AudioPlayer {
 
   seekTo(time: number): void {
     if (this.audio) {
-      this.audio.currentTime = Math.min(time, this._duration);
+      try { this.audio.currentTime = Math.min(time, this._duration); } catch {}
     }
   }
 
   setVolume(v: number): void {
     if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+      try { this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05); } catch {}
     }
   }
 
   stop(): void {
-    this._isPlaying = false;
-    this.stopTimeUpdates();
-    if (this.sourceNode) {
-      try { this.sourceNode.disconnect(); } catch {}
-      this.sourceNode = null;
-    }
-    if (this.audio) {
-      this.audio.pause();
-      this.audio.src = "";
-      this.audio.load();
-      this.audio = null;
-    }
+    this._playLock = false;
+    this.stopInternal();
   }
 
   onTimeUpdate(cb: (t: number) => void): void { this._onTimeUpdate = cb; }
@@ -229,7 +230,7 @@ export class AudioPlayer {
   destroy(): void {
     this.stop();
     if (this.ctx && this.ctx.state !== "closed") {
-      this.ctx.close();
+      try { this.ctx.close(); } catch {}
     }
     this.ctx = null;
   }
