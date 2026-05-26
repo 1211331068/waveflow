@@ -205,26 +205,31 @@ export function useMusicPlayer() {
   }, [player, playNextSafe]);
 
   // ─── 公开 API ───
-  const play = useCallback((index?: number) => {
+  const play = useCallback(async (index?: number) => {
+    // 移动端：先从用户手势激活 AudioContext
+    await player.warmup();
     const idx = index ?? currentIndexRef.current;
     if (idx >= 0 && idx < playlistRef.current.length) {
       pendingPlayRef.current = false;
       skipCountRef.current = 0;
       playOneTrack(idx);
     }
-  }, [playOneTrack]);
+  }, [player, playOneTrack]);
 
   const pause = useCallback(() => {
     try { player.pause(); } catch {}
     setState((s) => ({ ...s, isPlaying: false }));
   }, [player]);
 
-  const resume = useCallback(() => {
-    try { player.resume(); } catch {}
+  const resume = useCallback(async () => {
+    try {
+      await player.warmup();
+      await player.resume();
+    } catch {}
     setState((s) => ({ ...s, isPlaying: true }));
   }, [player]);
 
-  const togglePlay = useCallback(() => {
+  const togglePlay = useCallback(async () => {
     if (state.isPlaying) pause();
     else if (state.currentTime > 0) resume();
     else play();

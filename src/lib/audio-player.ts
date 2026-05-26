@@ -25,29 +25,54 @@ export class AudioPlayer {
   async init(): Promise<void> {
     if (this.ctx) return;
     try {
-      this.ctx = new AudioContext();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = 0.85;
-
-      this.lofiFilter = this.ctx.createBiquadFilter();
-      this.lofiFilter.type = "lowpass";
-      this.lofiFilter.frequency.value = 20000;
-
-      this.exciter = this.ctx.createWaveShaper();
-      this.exciter.curve = this.makeLinearCurve();
-
-      this.qualityGain = this.ctx.createGain();
-      this.qualityGain.gain.value = 1;
-
-      this.masterGain.connect(this.lofiFilter);
-      this.lofiFilter.connect(this.exciter);
-      this.exciter.connect(this.qualityGain);
-      this.qualityGain.connect(this.ctx.destination);
-
-      this.applyQuality(this._currentQuality);
+      // 移动端：不在页面加载时创建 AudioContext，等用户交互后再调用
+      if (typeof window !== "undefined" && "ontouchstart" in window) {
+        // 移动端延迟到用户首次交互
+        return;
+      }
+      this.createContext();
     } catch (e) {
       console.warn("AudioContext init failed:", e);
     }
+  }
+
+  // 从用户手势中激活音频上下文（移动端必须）
+  async warmup(): Promise<boolean> {
+    try {
+      if (!this.ctx) {
+        this.createContext();
+      }
+      if (this.ctx && this.ctx.state === "suspended") {
+        await this.ctx.resume();
+      }
+      return this.ctx?.state === "running";
+    } catch {
+      return false;
+    }
+  }
+
+  private createContext(): void {
+    if (this.ctx) return;
+    this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = 0.85;
+
+    this.lofiFilter = this.ctx.createBiquadFilter();
+    this.lofiFilter.type = "lowpass";
+    this.lofiFilter.frequency.value = 20000;
+
+    this.exciter = this.ctx.createWaveShaper();
+    this.exciter.curve = this.makeLinearCurve();
+
+    this.qualityGain = this.ctx.createGain();
+    this.qualityGain.gain.value = 1;
+
+    this.masterGain.connect(this.lofiFilter);
+    this.lofiFilter.connect(this.exciter);
+    this.exciter.connect(this.qualityGain);
+    this.qualityGain.connect(this.ctx.destination);
+
+    this.applyQuality(this._currentQuality);
   }
 
   private makeLinearCurve(): Float32Array<ArrayBuffer> {
@@ -103,11 +128,22 @@ export class AudioPlayer {
     this._playLock = true;
 
     try {
-      if (!this.ctx) await this.init();
+      // 确保已 warmup
+      if (!this.ctx) {
+        await this.warmup();
+      }
       if (!this.ctx) { this._playLock = false; return; }
 
+      // 再次尝试恢复（移动端关键步骤）
       if (this.ctx.state === "suspended") {
-        await this.ctx.resume();
+        try {
+          await this.ctx.resume();
+        } catch {
+          // Autoplay 被阻止
+          this._playLock = false;
+          this._onError?.("请先点击页面任意位置再播放");
+          return;
+        }
       }
 
       // 先完全停止当前播放
@@ -129,7 +165,7 @@ export class AudioPlayer {
       }, { once: true });
 
       this.audio.addEventListener("error", () => {
-        if (!this._isPlaying) return; // 已经停止的忽略
+        if (!this._isPlaying) return;
         this._isPlaying = false;
         this.stopTimeUpdates();
         this._onError?.("音频加载失败");
@@ -143,12 +179,21 @@ export class AudioPlayer {
 
       this.audio.src = url;
 
-      await this.audio.play();
-      this._isPlaying = true;
-      this.startTimeUpdates();
+      try {
+        await this.audio.play();
+        this._isPlaying = true;
+        this.startTimeUpdates();
+      } catch (playErr: any) {
+        this._isPlaying = false;
+        if (playErr.name === "NotAllowedError") {
+          this._onError?.("请先点击页面任意位置再播放");
+        } else {
+          this._onError?.("播放失败，请重试");
+        }
+      }
     } catch (e) {
       this._isPlaying = false;
-      this._onError?.("播放失败");
+      this._onError?.("播放出错");
     } finally {
       this._playLock = false;
     }
@@ -197,12 +242,20 @@ export class AudioPlayer {
     }
   }
 
-  resume(): void {
+  async resume(): Promise<void> {
     if (this.audio) {
-      this.audio.play().then(() => {
+      try {
+        // 确保 AudioContext 已激活
+        if (this.ctx && this.ctx.state === "suspended") {
+          await this.ctx.resume();
+        }
+        await this.audio.play();
         this._isPlaying = true;
         this.startTimeUpdates();
-      }).catch(() => {});
+      } catch {
+        // 忽略移动端自动播放错误
+        this._isPlaying = false;
+      }
     }
   }
 
