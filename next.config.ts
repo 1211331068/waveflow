@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["NeteaseCloudMusicApi"],
+  // NeteaseCloudMusicApi 特定模块直接打包，无需 external
 };
 
 export default nextConfig;
